@@ -141,3 +141,12 @@ __azurite_db*__.json
 .python_packages
 .azure
 remote_appsettings.json
+
+# CI/CD artifacts
+*.zip
+junit/
+test-results.xml
+*.trx
+.DS_Store
+.vscode/
+.idea/

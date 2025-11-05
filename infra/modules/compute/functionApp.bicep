@@ -33,9 +33,23 @@ param hostingPlanName string
 param applicationInsightsName string
 param virtualNetworkSubnetId string
 param funcStorageName string
+@description('Maximum instance count for Flex Consumption plan. Default: 100')
+param maximumInstanceCount int = 100
+@description('Instance memory in MB for Flex Consumption plan. Allowed: 2048, 4096. Default: 2048')
+@allowed([2048, 4096])
+param instanceMemoryMB int = 2048
+@description('Whether the hosting plan is Flex Consumption. Affects function app configuration.')
+param isFlexConsumption bool = true
 var functionAppName = appName
 var functionWorkerRuntime = runtime
 
+// Map runtime to functionAppConfig runtime name
+// Flex Consumption supports: python, node, dotnet-isolated, java, powerShell
+var runtimeName = runtime == 'python' ? 'python' : (runtime == 'node' ? 'node' : (runtime == 'dotnet' ? 'dotnet-isolated' : runtime))
+
+// Construct blob endpoint URL for deployment storage (required for Flex Consumption validation)
+// Note: For zipDeploy, deployment.storage is not actually used, but Azure requires it to be valid if present
+var deploymentStorageBlobEndpoint = 'https://${funcStorageName}.blob.${environment().suffixes.storage}/deployment'
 
 var openaiApiVersion = '2024-05-01-preview'
 var openaiApiBase = aoaiEndpoint
@@ -66,7 +80,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
     virtualNetworkSubnetId: networkIsolation ? virtualNetworkSubnetId : null
     siteConfig: {
       cors: {allowedOrigins: ['https://ms.portal.azure.com', 'https://portal.azure.com'] }
-      alwaysOn: true
+      // alwaysOn is not supported for Flex Consumption plans
+      alwaysOn: isFlexConsumption ? null : true
       publicNetworkAccess: networkIsolation ? null : 'Enabled'
       ipSecurityRestrictionsDefaultAction : networkIsolation ? 'Deny' : 'Allow'
       ipSecurityRestrictions: networkIsolation ? [
@@ -129,11 +144,14 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'ApplicationInsights__InstrumentationKey'
           value: applicationInsights.properties.InstrumentationKey
         }
+        // FUNCTIONS_WORKER_RUNTIME is not allowed for Flex Consumption plans
+        // Runtime is configured via functionAppConfig.runtime instead
+      ], isFlexConsumption ? [] : [
         {
           name: 'FUNCTIONS_WORKER_RUNTIME'
           value: functionWorkerRuntime
         }
-        
+      ], isFlexConsumption ? [] : [
         {
           name: 'ENABLE_ORYX_BUILD'
           value: 'true'
@@ -142,6 +160,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
           value: 'true'
         }
+      ], [
         {
           name: 'APP_CONFIGURATION_URI'
           value: concat('https://', appConfigName, '.azconfig.io')
@@ -171,9 +190,35 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
       ] : [])
       ftpsState: 'FtpsOnly'
-      linuxFxVersion: linuxFxVersion
+      // linuxFxVersion is not allowed for Flex Consumption plans
+      // It must be set via functionAppConfig.runtime instead
+      linuxFxVersion: isFlexConsumption ? null : linuxFxVersion
       minTlsVersion: '1.2'
-    }  
+    }
+    // Flex Consumption plan requires functionAppConfig
+    // Note: deployment.storage is optional for zipDeploy, but Azure requires it to be valid if present
+    // We provide a minimal valid configuration to satisfy validation
+    functionAppConfig: isFlexConsumption ? {
+      runtime: {
+        name: runtimeName
+        version: runtime == 'python' ? '3.11' : (runtime == 'node' ? '20' : '~4')
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: maximumInstanceCount
+        instanceMemoryMB: instanceMemoryMB
+      }
+      // deployment.storage is required for validation even with zipDeploy
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: deploymentStorageBlobEndpoint
+          authentication: {
+            type: 'UserAssignedIdentity'
+            userAssignedIdentityResourceId: identityId
+          }
+        }
+      }
+    } : null
     httpsOnly: true
   }
 }
